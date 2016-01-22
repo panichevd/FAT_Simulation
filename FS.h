@@ -63,6 +63,8 @@ private:
 
     int open_file(const char *path, OpenedFile &file);
     int increase_size(const char *path, unsigned int diff);
+    int get_next_file_block(int current_block);
+
     int get_next_free_block();
     bool create_root_directory();
     bool update_fs_structs();
@@ -76,8 +78,9 @@ public:
     int open(const char *path);
     void close(int fd);
 
-    int write(int fd, void *buffer, size_t nbyte);
-    int read(int fd, void *buffer, size_t nbyte);
+    int lseek(int fd, int offset, int whence);
+    int read(int fd, void *data, size_t nbyte);
+    int write(int fd, void *data, size_t nbyte);
 };
 
 #endif

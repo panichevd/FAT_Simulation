@@ -97,7 +97,7 @@ bool FAT::create_root_directory()
     if (::write(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
         return false;
 
-    lseek(m_fd, TABLE_SIZE*sizeof(unsigned int), SEEK_SET);
+    ::lseek(m_fd, TABLE_SIZE*sizeof(unsigned int), SEEK_SET);
     if (::write(m_fd, m_free_blocks, BLOCK_SIZE) != BLOCK_SIZE)
         return false;
 
@@ -112,7 +112,7 @@ int FAT::open_file(const char *path, OpenedFile &opened_file)
 
     while (true)
     {
-        lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
+        ::lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
         unsigned int read_size = (size > BLOCK_SIZE) ? BLOCK_SIZE : size;
         if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
@@ -127,7 +127,7 @@ int FAT::open_file(const char *path, OpenedFile &opened_file)
             }
         }
 
-        block = m_table[block];
+        block = get_next_file_block[block];
         if (block == -1)
             break;
 
@@ -149,6 +149,11 @@ int FAT::get_next_free_block()
     }
 }
 
+int FAT::get_next_file_block(int current_block)
+{
+    return m_table[current_block];
+}
+
 int FAT::increase_size(const char *path, unsigned int diff)
 {
     int block = m_root->get_first_block();
@@ -157,7 +162,7 @@ int FAT::increase_size(const char *path, unsigned int diff)
 
     while (true)
     {
-        lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
+        ::lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
         unsigned int read_size = (size > BLOCK_SIZE) ? BLOCK_SIZE : size;
         if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
@@ -170,7 +175,9 @@ int FAT::increase_size(const char *path, unsigned int diff)
                 file.increase_size(diff);
                 file.get_data(buffer + i);
                 ::lseek(m_fd, -static_cast<int>(BLOCK_SIZE), SEEK_CUR);
-                return ::write(m_fd, buffer, BLOCK_SIZE);
+                if (::write(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
+                    return -1;
+                return 0;
             }
         }
 
@@ -187,7 +194,7 @@ int FAT::increase_size(const char *path, unsigned int diff)
 
 bool FAT::update_fs_structs()
 {
-    lseek(m_fd, 0, SEEK_SET);
+    ::lseek(m_fd, 0, SEEK_SET);
 
     if (::write(m_fd, m_table, TABLE_SIZE*sizeof(unsigned int)) != TABLE_SIZE*sizeof(unsigned int))
         return false;
@@ -211,7 +218,7 @@ int FAT::create(const char *path)
 
     while (true)
     {
-        lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
+        ::lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
         unsigned int read_size = (size > BLOCK_SIZE) ? BLOCK_SIZE : size;
         if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
@@ -237,11 +244,11 @@ int FAT::create(const char *path)
     {
         int new_block = get_next_free_block();
         m_table[block] = new_block;
-        lseek(m_fd, DATA_OFFSET + new_block*BLOCK_SIZE, SEEK_SET);
+        ::lseek(m_fd, DATA_OFFSET + new_block*BLOCK_SIZE, SEEK_SET);
         size = 0;
     }
     else
-        lseek(m_fd, -static_cast<int>(BLOCK_SIZE), SEEK_CUR);
+        ::lseek(m_fd, -static_cast<int>(BLOCK_SIZE), SEEK_CUR);
 
     // Write directory changes
     new_file.get_data(buffer + size);
@@ -282,62 +289,153 @@ void FAT::close(int fd)
     m_opened_files.erase(fd);
 }
 
-// TODO: file pointer moving
-// TODO: check of last block in loop
+int FAT::lseek(int fd, int offset, int whence)
+{
+    auto it = m_opened_files.find(fd);
+    if (it == m_opened_files.end())
+        return -1;
+    OpenedFile & of = it->second;
+
+    int tmp_offset = 0;
+
+    switch (whence)
+    {
+    case SEEK_SET:
+        tmp_offset = offset;
+        break;
+    case SEEK_END:
+        tmp_offset = of.size + offset;
+        break;
+    case SEEK_CUR:
+        tmp_offset = of.file_pointer + offset;
+        break;
+    default:
+        return -1;
+    }
+
+    if (tmp_offset < 0 || tmp_offset > of.size)
+        return -1;
+
+    of.file_pointer = tmp_offset;
+
+    for (of.current_block = of.first_block; tmp_offset > BLOCK_SIZE; tmp_offset -= BLOCK_SIZE)
+        of.current_block = get_next_file_block(of.current_block);
+
+    return of.file_pointer;
+}
+
+int FAT::read(int fd, void *data, size_t nbyte)
+{
+    auto it = m_opened_files.find(fd);
+    if (it == m_opened_files.end())
+        return -1;
+
+    OpenedFile & of = it->second;
+    if (of.size - of.file_pointer < nbyte)
+        return -1;
+
+    char buffer[BLOCK_SIZE];
+    unsigned int read = 0, to_read = 0;
+
+    //  Read from current block if we can
+    int left = BLOCK_SIZE - of.file_pointer % BLOCK_SIZE;
+    if (of.file_pointer == 0)
+        left = BLOCK_SIZE;
+
+    if (left == 0)
+    {
+        of.current_block = get_next_file_block(of.current_block);
+        left = BLOCK_SIZE;
+    }
+
+    ::lseek(m_fd, DATA_OFFSET + of.current_block*BLOCK_SIZE, SEEK_SET);
+    if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
+        return-1;
+
+    to_read = (nbyte <= left) ? nbyte : left;
+    memcpy(data, buffer + of.file_pointer % BLOCK_SIZE, to_read);
+    read += to_read;
+    of.file_pointer += to_read;
+
+    //  Read remaining blocks
+    while (read != nbyte)
+    {
+        of.current_block = get_next_file_block(of.current_block);
+        ::lseek(m_fd, DATA_OFFSET + of.current_block*BLOCK_SIZE, SEEK_SET);
+        if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
+            return-1;
+
+        left = nbyte - read;
+        to_read = (left <= BLOCK_SIZE) ? left : BLOCK_SIZE;
+        memcpy(static_cast<unsigned char *>(data) + read, buffer, to_read);
+        read += to_read;
+        of.file_pointer += to_read;
+    }
+
+    return 0;
+}
+
 int FAT::write(int fd, void *data, size_t nbyte)
 {
     auto it = m_opened_files.find(fd);
     if (it == m_opened_files.end())
         return -1;
 
-    char buffer[BLOCK_SIZE];
-    unsigned int written = 0;
+    OpenedFile & of = it->second;
 
-    unsigned int left = BLOCK_SIZE - it->second.file_pointer % BLOCK_SIZE;
-    if (it->second.file_pointer > 0)
-        left = 0;
+    char buffer[BLOCK_SIZE];
+    unsigned int written = 0, to_write = 0;
+
+    //  Write to last file block if we can
+    unsigned int left = BLOCK_SIZE - of.file_pointer % BLOCK_SIZE;
+    if (of.file_pointer == 0)
+        left = BLOCK_SIZE;
 
     if (left > 0)
     {
-        ::lseek(m_fd, DATA_OFFSET + it->second.current_block*BLOCK_SIZE, SEEK_SET);
+        ::lseek(m_fd, DATA_OFFSET + of.current_block*BLOCK_SIZE, SEEK_SET);
         if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
         
-        memcpy(buffer + it->second.file_pointer % BLOCK_SIZE, data, (nbyte <= left) ? nbyte: left);
-        ::lseek(m_fd, DATA_OFFSET + it->second.current_block*BLOCK_SIZE, SEEK_SET);
+        to_write = (nbyte <= left) ? nbyte : left;
+        memcpy(buffer + of.file_pointer % BLOCK_SIZE, data, to_write);
+        ::lseek(m_fd, DATA_OFFSET + of.current_block*BLOCK_SIZE, SEEK_SET);
         if (::write(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
 
-        written += (nbyte <= left) ? nbyte: left;
-        it->second.file_pointer += written;
+        written += to_write;
+        of.file_pointer += to_write;
+        of.size += to_write;
 
         if (nbyte <= left)
-            return increase_size(it->second.path.c_str(), written);
+            return increase_size(of.path.c_str(), to_write);
     }
 
+    //  Add new blocks to file and write to them
     while (written != nbyte)
     {
         int new_block = get_next_free_block();
-        m_table[it->second.current_block] = new_block;
-        it->second.current_block = new_block;
-        ::lseek(m_fd, DATA_OFFSET + it->second.current_block*BLOCK_SIZE, SEEK_SET);
+        m_table[of.current_block] = new_block;
+        of.current_block = new_block;
+        ::lseek(m_fd, DATA_OFFSET + of.current_block*BLOCK_SIZE, SEEK_SET);
 
         left = nbyte - written;
+        to_write = (left <= BLOCK_SIZE) ? left : BLOCK_SIZE;
 
         memset(buffer, 0, BLOCK_SIZE);
-        memcpy(buffer, static_cast<unsigned char*>(data) + written, (left <= BLOCK_SIZE) ? left : BLOCK_SIZE);
+        memcpy(buffer, static_cast<unsigned char*>(data) + written, to_write);
         if (::write(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
             return -1;
-        written += (left <= BLOCK_SIZE) ? left : BLOCK_SIZE;
+
+        written += to_write;
+        of.file_pointer += to_write;
+        of.size += to_write;
+        if (increase_size(of.path.c_str(), to_write))
+            return -1;
     }
 
     update_fs_structs();
     return 0;
-}
-
-int FAT::read(int fd, void *buffer, size_t nbyte)
-{
-    return -1;
 }
 
 int main()
@@ -349,8 +447,17 @@ int main()
     fs.create("new_fil2");
     int fd = fs.open("new_fil2");
 
-    char buffer[5] = { 0, 18, 23, 1, 6} ;
-    fs.write(fd, buffer, 5);
+    char buffer[5*4096];
+    for (unsigned i = 0; i < 5*4096; ++i)
+        buffer[i] = i % 255 + 2*i;
+
+    fs.lseek(fd, 0, SEEK_END);
+    fs.write(fd, buffer, 5*4096);
+    fs.lseek(fd, 5120, SEEK_SET);
+
+    char tmp[4087];
+    fs.read(fd, tmp, 4087);
+
     fs.close(fd);
 
     return 0;
