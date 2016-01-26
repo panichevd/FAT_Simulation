@@ -61,7 +61,7 @@ private:
     unsigned int m_next_descriptor;
     map<unsigned int, OpenedFile> m_opened_files;
 
-    int open_file(const char *path, OpenedFile &file);
+    int get_next_file_descriptor(const OpenedFile &of);
     int increase_size(const char *path, unsigned int diff);
     int get_next_file_block(int current_block);
 
@@ -74,7 +74,6 @@ public:
 
     bool initialized() const { return m_init; }
 
-    int create(const char *path);
     int open(const char *path);
     void close(int fd);
 

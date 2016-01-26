@@ -104,39 +104,6 @@ bool FAT::create_root_directory()
     return true;
 }
 
-int FAT::open_file(const char *path, OpenedFile &opened_file)
-{
-    int block = m_root->get_first_block();
-    unsigned int size = m_root->get_size();
-    unsigned char buffer[BLOCK_SIZE];
-
-    while (true)
-    {
-        ::lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
-        unsigned int read_size = (size > BLOCK_SIZE) ? BLOCK_SIZE : size;
-        if (::read(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
-            return -1;
-
-        for (unsigned int i = 0; i < read_size; i += DirectoryEntry::DIRECTORY_ENTRY_SIZE)
-        {
-            DirectoryEntry file(buffer + i);
-            if (string(path).substr(0, 8) == file.get_name())
-            {
-                opened_file = { path, 0, file.get_first_block(), file.get_first_block(), file.get_size() };
-                return 0;
-            }
-        }
-
-        block = get_next_file_block[block];
-        if (block == -1)
-            break;
-
-        size -= BLOCK_SIZE;
-    }
-
-    return -1;
-}
-
 int FAT::get_next_free_block()
 {
     for (int i = 0; i < TABLE_SIZE; ++i)
@@ -189,7 +156,12 @@ int FAT::increase_size(const char *path, unsigned int diff)
     }
 
     return -1;
+}
 
+int FAT::get_next_file_descriptor(const OpenedFile &of)
+{
+    m_opened_files[m_next_descriptor] = of;
+    return m_next_descriptor++;
 }
 
 bool FAT::update_fs_structs()
@@ -210,12 +182,21 @@ bool FAT::update_fs_structs()
     return true;
 }
 
-int FAT::create(const char *path)
+int FAT::open(const char *path)
 {
+    //  check if already open
+    for (auto it = m_opened_files.begin(); it != m_opened_files.end(); ++it)
+    {
+        if (it->second.path == path)
+            return -1;
+    }
+
+    OpenedFile of;
     int block = m_root->get_first_block();
     unsigned int size = m_root->get_size();
     unsigned char buffer[BLOCK_SIZE];
 
+    // check if exists
     while (true)
     {
         ::lseek(m_fd, DATA_OFFSET + block*BLOCK_SIZE, SEEK_SET);
@@ -227,7 +208,10 @@ int FAT::create(const char *path)
         {
             DirectoryEntry file(buffer + i);
             if (string(path).substr(0, 8) == file.get_name())
-                return -1;
+            {
+                of = { path, 0, file.get_first_block(), file.get_first_block(), file.get_size() };
+                return get_next_file_descriptor(of);
+            }
         }
 
         block = m_table[block];
@@ -237,9 +221,11 @@ int FAT::create(const char *path)
         size -= BLOCK_SIZE;
     }
 
+    // Create if not exists
     int file_block = get_next_free_block();
     DirectoryEntry new_file(false, path, file_block, 0);
 
+    // Write changes to directory
     if (size == BLOCK_SIZE)
     {
         int new_block = get_next_free_block();
@@ -250,7 +236,6 @@ int FAT::create(const char *path)
     else
         ::lseek(m_fd, -static_cast<int>(BLOCK_SIZE), SEEK_CUR);
 
-    // Write directory changes
     new_file.get_data(buffer + size);
     if (::write(m_fd, buffer, BLOCK_SIZE) != BLOCK_SIZE)
         return -1;
@@ -265,23 +250,8 @@ int FAT::create(const char *path)
     if (!update_fs_structs())
         return -1;
 
-    return 0;
-}
-
-int FAT::open(const char *path)
-{
-    for (auto it = m_opened_files.begin(); it != m_opened_files.end(); ++it)
-    {
-        if (it->second.path == path)
-            return -1;
-    }
-
-    OpenedFile of;
-    if (open_file(path, of) == -1)
-        return -1;
-
-    m_opened_files[m_next_descriptor] = of;
-    return m_next_descriptor++;
+    of = { path, 0, file_block, file_block, 0 };
+    return get_next_file_descriptor(of);
 }
 
 void FAT::close(int fd)
@@ -444,7 +414,6 @@ int main()
     if (!fs.initialized())
         return -1;
 
-    fs.create("new_fil2");
     int fd = fs.open("new_fil2");
 
     char buffer[5*4096];
